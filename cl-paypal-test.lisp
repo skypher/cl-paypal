@@ -1,7 +1,29 @@
-(setf hunchentoot:*show-lisp-errors-p* t
-      hunchentoot:*show-lisp-backtraces-p* t)
+;;
+;; CL-PAYPAL - example for a simple hunchentoot paypal server
+;;
+;; (c) Hans Huebner - hans@huebner.org
+;; (c) Manuel Odendahl - wesen@ruinwesen.com
+;;
+;; To run, call TEST-EXPRESS-CHECKOUT and then point your browser to http://localhost:8080/checkout
+;; Go to http://localhost:8080/stop to kill the server.
 
-(require :cl-paypal)
+(eval-when (:compile-toplevel)
+  (require :cl-paypal))
+
+;; configuration variables - set these to appropriate values for your account
+
+(defparameter *paypal-api-url*   "https://api-3t.sandbox.paypal.com/nvp")
+(defparameter *paypal-user*      "useremail")
+(defparameter *paypal-password*  "password")
+(defparameter *paypal-signature* "signature")
+
+(setf hunchentoot:*show-lisp-errors-p* t)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; 
+;; Simple dispatcher
+;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defgeneric dispatch-request (request-type request)
   (:documentation "dispatch incoming http request"))
@@ -14,46 +36,55 @@
   (let ((request-type-var (gensym)))
     `(defmethod dispatch-request ((,request-type-var (eql ,type)) ,request)
        (declare (ignore ,request-type-var))
-       (lambda () ,@body))))
+       ,@body)))
+
+(defun dispatch-request% (request)
+  (let* ((type-string 
+          (cl-ppcre:scan-to-strings "[^/]+" (hunchentoot:script-name request)))
+         (request-type 
+          (and type-string (find-symbol (string-upcase type-string) :keyword))))
+    (dispatch-request request-type request)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; 
+;; Paypal URLs
+;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (define-handler :checkout (request)
   (hunchentoot:redirect 
-   (cl-paypal:make-express-checkout-url 10)
-   ))
+   (cl-paypal:make-express-checkout-url 1 (hunchentoot:remote-addr request))))
 
 (define-handler :stop (request)
   (throw 'stop-server nil))
 
-
 (define-handler :return-paypal (request)
   (cl-paypal:get-and-do-express-checkout
-   (lambda () (print "Paypal Express Checkout OK"))
-   (lambda () (print "Paypal Express Checkout NG"))
-   )
-  )
+   (lambda (&key amount currencycode token result) 
+     (format t "Paypal Express Checkout OK~%Amount is ~A~%
+              Currencycod is ~A~%Token is~A~%Result is ~A"
+             amount currencycode token result))
+   (lambda () (print "Paypal Express Checkout NG"))))
 
 (define-handler :cancel-paypal (request)
   "Cancelled")
 
-(defun dispatch-request% (request)
-  (let* ((type-string (cl-ppcre:scan-to-strings "[^/]+" (hunchentoot:script-name request)))
-         (request-type (and type-string (find-symbol (string-upcase type-string) :keyword))))
-    (dispatch-request request-type request)))
-
-;; send-user "wangyi_1228286489_per@yeah.net" 
-;; send-user's password "228286734"
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; 
+;;  Express checkout initialization
+;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defun test-express-checkout (&key (response-port 8080) (response-host "127.0.0.1"))
-  (cl-paypal:init "https://api-3t.sandbox.paypal.com/nvp" 
-		"hans.huebner_api1.gmail.com"
-		"62QFQPLEMM6P3M25"
-		"AFcWxV21C7fd0v3bYYYRCpSSRl31Ac-RAs1SuG20a1IoPMJ0WKbx0fdG"
-		(format nil "http://~A:~A/return-paypal" response-host response-port)
-		(format nil "http://~A:~A/cancel-paypal" response-host response-port)
-		:useraction "commit"
-		:currencycode "EUR"
-		)
+  (cl-paypal:init *paypal-api-url*   ; api-url 
+                  *paypal-user*      ; user email
+                  *paypal-password*  ; password
+                  *paypal-signature* ; signature 
+                  (format nil "http://~A:~A/return-paypal" response-host response-port) ; return-url 
+                  (format nil "http://~A:~A/cancel-paypal" response-host response-port) ; cancel-url
+                  :useraction "commit"
+                  :currencycode "EUR")
   (catch 'stop-server
-    (hunchentoot:start-server :port response-port
-                       :dispatch-table 
-		       (list #'dispatch-request%))))
+    (hunchentoot:start (make-instance 'hunchentoot:acceptor :port response-port
+                                      :taskmaster (make-instance 'hunchentoot:single-threaded-taskmaster)
+                                      :REQUEST-DISPATCHER  #'dispatch-request%))))
